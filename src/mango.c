@@ -635,6 +635,9 @@ static void checkidleinhibitor(struct wlr_surface *exclude);
 static void cleanup(void);										  // 退出清理
 static void cleanupmon(struct wl_listener *listener, void *data); // 退出清理
 static void closemon(Monitor *m);
+static void surface_leave_output(struct wlr_surface *surface,
+								 struct wlr_output *output);
+static void scene_leave_output(struct wlr_output *output);
 static void cleanuplisteners(void);
 static void toggle_hotarea(int32_t x_root, int32_t y_root); // 触发热区
 static void maplayersurfacenotify(struct wl_listener *listener, void *data);
@@ -2535,8 +2538,10 @@ void cleanupmon(struct wl_listener *listener, void *data) {
 
 	/* m->layers[i] are intentionally not unlinked */
 	for (i = 0; i < LENGTH(m->layers); i++) {
-		wl_list_for_each_safe(l, tmp, &m->layers[i], link)
+		wl_list_for_each_safe(l, tmp, &m->layers[i], link) {
+			surface_leave_output(l->layer_surface->surface, m->wlr_output);
 			wlr_layer_surface_v1_destroy(l->layer_surface);
+		}
 	}
 
 	// clean ext-workspaces grouplab
@@ -2551,6 +2556,10 @@ void cleanupmon(struct wl_listener *listener, void *data) {
 	if (m->lock_surface)
 		destroylocksurface(&m->destroy_lock_surface, NULL);
 	m->wlr_output->data = NULL;
+	surface_leave_output(last_cursor.surface, m->wlr_output);
+	surface_leave_output(seat->pointer_state.focused_surface, m->wlr_output);
+	surface_leave_output(seat->keyboard_state.focused_surface, m->wlr_output);
+	scene_leave_output(m->wlr_output);
 	wlr_output_layout_remove(output_layout, m->wlr_output);
 	wlr_scene_output_destroy(m->scene_output);
 
@@ -2571,6 +2580,37 @@ void cleanupmon(struct wl_listener *listener, void *data) {
 
 	free(m->pertag);
 	free(m);
+}
+
+static void surface_leave_output(struct wlr_surface *surface,
+								 struct wlr_output *output) {
+	if (!surface || !output) {
+		return;
+	}
+
+	struct wlr_surface_output *surface_output, *tmp;
+	wl_list_for_each_safe(surface_output, tmp,
+						  &surface->current_outputs, link) {
+		if (surface_output->output == output) {
+			wlr_surface_send_leave(surface, output);
+		}
+	}
+}
+
+static void iter_scene_surface_leave_output(struct wlr_scene_buffer *buffer,
+											int32_t sx, int32_t sy,
+											void *data) {
+	struct wlr_scene_surface *scene_surface =
+		wlr_scene_surface_try_from_buffer(buffer);
+
+	if (scene_surface) {
+		surface_leave_output(scene_surface->surface, data);
+	}
+}
+
+static void scene_leave_output(struct wlr_output *output) {
+	wlr_scene_node_for_each_buffer(&scene->tree.node,
+								   iter_scene_surface_leave_output, output);
 }
 
 void closemon(Monitor *m) {
@@ -3643,6 +3683,8 @@ void destroyidleinhibitor(struct wl_listener *listener, void *data) {
 void destroylayernodenotify(struct wl_listener *listener, void *data) {
 	LayerSurface *l = wl_container_of(listener, l, destroy);
 
+	if (l->layer_surface && l->mon)
+		surface_leave_output(l->layer_surface->surface, l->mon->wlr_output);
 	wl_list_remove(&l->link);
 	wl_list_remove(&l->destroy.link);
 	wl_list_remove(&l->map.link);
